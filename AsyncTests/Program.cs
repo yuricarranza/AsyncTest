@@ -1,8 +1,12 @@
-﻿using System;
+﻿using AsyncTests.Models;
+using MySqlConnector;
+using Polly;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace AsyncTests
@@ -12,21 +16,35 @@ namespace AsyncTests
         static async Task Main(string[] args)
         {
             //5741
-            List<string> codes = new List<string> { "co", "pe", "es", "en",  "col", "co", "pe", "es", "en", "col" };
-            List<Task<string>> tasks = new List<Task<string>>();
+            List<string> codes = new List<string> { "co", "pe", "es", "ar", "cl" };
+            List<string> multiplesCodes = new List<string>();
+            for (int i = 0; i < 10000; i++)
+            {
+                multiplesCodes.AddRange(codes);
+            }
+            List<Task<Country>> tasks = new List<Task<Country>>();
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
             CountryService countryService = new CountryService();
-            foreach (var item in codes)
+            CountryDataAccess countryDataAccess = new CountryDataAccess();
+            var policy = Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(new[] {
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(2),
+                TimeSpan.FromSeconds(4)
+            });
+
+            foreach (var item in multiplesCodes)
             {
-                tasks.Add(countryService.GetPaisAsync(item));
+                tasks.Add(policy.ExecuteAsync( () => countryService.GetPaisAsync(item)));                
             }
 
             var tasksProcessed = tasks.Select(async x =>
             {
-                var json = await x;
+                var country = await x;
+                await policy.ExecuteAsync(async() => await countryDataAccess.SaveCountryAsync(country));
                 Console.WriteLine("-------------------------\n");
-                Console.WriteLine(json);
             }).ToArray();
 
             await Task.WhenAll(tasksProcessed);
@@ -46,10 +64,31 @@ namespace AsyncTests
             httpClient.BaseAddress = new Uri("https://restcountries.eu/rest/v2/alpha/");
         }
 
-        public async Task<string> GetPaisAsync(string code)
+        public async Task<Country> GetPaisAsync(string code)
         {
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+
             var response = await httpClient.GetAsync(code);
-            return await response.Content.ReadAsStringAsync();
+            var json = await response.Content.ReadAsStringAsync();
+            var country = JsonSerializer.Deserialize<Country>(json, options);
+            return country;
         }
+    }
+
+    class CountryDataAccess
+    {
+        public async Task SaveCountryAsync(Country country)
+        {
+            using (MySqlConnection mySqlConnection = new MySqlConnection("Server=127.0.0.1;Port=3307;Database=Test;Uid=root;Pwd=root;"))
+            {
+                await mySqlConnection.OpenAsync();
+                var command = new MySqlCommand($"insert into Test.Country(name, code, capital) values ('{country.Name}', '{country.Code}','{country.Capital}')", mySqlConnection);
+                await command.ExecuteNonQueryAsync();
+            }
+        }
+
     }
 }
