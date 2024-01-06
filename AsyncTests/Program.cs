@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace AsyncTests
@@ -18,21 +19,26 @@ namespace AsyncTests
             //5741
             List<string> codes = new List<string> { "co", "pe", "es", "ar", "cl" };
             List<string> multiplesCodes = new List<string>();
-            for (int i = 0; i < 10000; i++)
+            for (int i = 0; i < 1000; i++)
             {
                 multiplesCodes.AddRange(codes);
             }
+            //multiplesCodes = multiplesCodes.Take(100).ToList();
             List<Task<Country>> tasks = new List<Task<Country>>();
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
             CountryService countryService = new CountryService();
             CountryDataAccess countryDataAccess = new CountryDataAccess();
+            SemaphoreSlim semaphoreSlim = new SemaphoreSlim(5, 5);
             var policy = Policy
             .Handle<Exception>()
             .WaitAndRetryAsync(new[] {
                 TimeSpan.FromSeconds(1),
                 TimeSpan.FromSeconds(2),
                 TimeSpan.FromSeconds(4)
+            },onRetry: (exception, timeSpan, retryCount, context) => {
+                Console.WriteLine(exception.Message);
+                Console.WriteLine($"Retry count {retryCount}");                
             });
 
             foreach (var item in multiplesCodes)
@@ -42,15 +48,24 @@ namespace AsyncTests
 
             var tasksProcessed = tasks.Select(async x =>
             {
-                var country = await x;
-                await policy.ExecuteAsync(async() => await countryDataAccess.SaveCountryAsync(country));
-                Console.WriteLine("-------------------------\n");
+                await semaphoreSlim.WaitAsync();
+                try
+                {
+                    var country = await x;
+                    await policy.ExecuteAsync(async () => await countryDataAccess.SaveCountryAsync(country));
+                    await Task.Delay(TimeSpan.FromSeconds(1));
+                }
+                finally
+                {
+                    semaphoreSlim.Release();
+                }            
+                
             }).ToArray();
 
-            await Task.WhenAll(tasksProcessed);
+            await Task.WhenAll(tasksProcessed);            
 
             stopwatch.Stop();
-            Console.WriteLine($"Tiempo transcurrido: {stopwatch.ElapsedMilliseconds} milisegundos");
+            Console.WriteLine($"Tiempo transcurrido: {stopwatch.Elapsed.TotalSeconds} segundos");
             Console.ReadLine();
         }
     }
@@ -72,6 +87,7 @@ namespace AsyncTests
             };
 
             var response = await httpClient.GetAsync(code);
+            response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync();
             var country = JsonSerializer.Deserialize<Country>(json, options);
             return country;
